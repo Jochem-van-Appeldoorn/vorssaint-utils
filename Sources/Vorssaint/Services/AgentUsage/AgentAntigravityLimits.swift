@@ -45,7 +45,7 @@ enum AgentAntigravityLimits {
 
     /// The first JSON line that is a successful `usage` command, reduced to
     /// limit windows: five-hour buckets as sessions, weekly ones as weeks.
-    /// Only the Gemini group counts; the Claude and GPT models Antigravity
+    /// Only the Gemini groups count; the Claude and GPT models Antigravity
     /// also offers have limits of their own that go unused here.
     static func parse(_ output: String, observed: Date) -> AgentLimits? {
         for line in output.split(separator: "\n") {
@@ -59,6 +59,10 @@ enum AgentAntigravityLimits {
             var windows: [AgentLimitWindow] = []
             for group in groups {
                 guard let name = group["name"] as? String, name.lowercased().hasPrefix("gemini") else { continue }
+                // A group for one model, like Gemini 4 Argon, has a quota of its own
+                // beside the shared one and is named after the model.
+                let scope = name.lowercased() == "gemini models" ? nil
+                    : name.split(separator: "(").first?.split(separator: " ").last.map(String.init)
                 for bucket in group["buckets"] as? [[String: Any]] ?? [] where bucket["disabled"] as? Bool != true {
                     guard let id = bucket["id"] as? String, !id.isEmpty,
                           let remaining = (bucket["remaining_fraction"] as? NSNumber)?.doubleValue,
@@ -67,7 +71,7 @@ enum AgentAntigravityLimits {
                     let kind: AgentLimitWindow.Kind = window == "5h" ? .session : window == "weekly" ? .weekly : .other
                     let minutes: Int? = window == "5h" ? 300 : window == "weekly" ? 10_080 : nil
                     windows.append(AgentLimitWindow(
-                        id: "antigravity:\(id)", kind: kind, minutes: minutes, scope: nil,
+                        id: "antigravity:\(id)", kind: kind, minutes: minutes, scope: scope,
                         usedPercent: min(100, max(0, (1 - remaining) * 100)),
                         resetsAt: (bucket["reset_time"] as? String).flatMap(AgentTimestamp.parse)))
                 }

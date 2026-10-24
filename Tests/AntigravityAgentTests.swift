@@ -139,6 +139,14 @@ enum AntigravityAgentTests {
                      "only the Gemini group's limits are shown, not the Claude and GPT ones")
         let argonLimits = AgentAntigravityLimits.parse(output.replacingOccurrences(of: "Gemini Models", with: "Gemini 4 Argon (Medium)"), observed: Date())
         suite.expect(argonLimits?.windows.count == 2, "Gemini 4 groups retain their session and weekly limits")
+        let argon = AgentAntigravityLimits.parse(output.replacingOccurrences(of: "{\"name\":\"Claude and GPT models\"",
+            with: "{\"name\":\"Gemini 4 Argon\",\"buckets\":[{\"id\":\"gemini-argon-wtu-weekly\",\"window\":\"weekly\",\"remaining_fraction\":0.25}]},{\"name\":\"Claude and GPT models\""),
+            observed: Date())?.windows ?? []
+        suite.expect(argon.count == 3 && argon.contains { $0.kind == .weekly && $0.scope == "Argon" && abs($0.usedPercent - 75) < 0.001 }
+                        && argon.contains { $0.kind == .weekly && $0.scope == nil && abs($0.usedPercent - 10) < 0.001 },
+                     "Argon's own weekly quota shows beside the shared Gemini week, named after the model")
+        suite.expect(argonLimits?.windows.allSatisfy { $0.scope == "Argon" } == true,
+                     "a model group's name drops the effort in brackets")
         suite.expect(windows.contains { $0.kind == .session && $0.scope == nil && abs($0.usedPercent - 3) < 0.001
                                         && $0.resetsAt != nil }
                         && windows.contains { $0.kind == .weekly && $0.scope == nil && abs($0.usedPercent - 10) < 0.001 },
