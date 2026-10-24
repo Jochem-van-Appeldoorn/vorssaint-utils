@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-10-09",
+  "updated": "2026-10-24",
   "sources": [
     "https://platform.claude.com/docs/en/about-claude/pricing",
     "https://platform.claude.com/docs/en/models/overview",
@@ -38,7 +38,7 @@
     "gpt-5.3-codex-spark has no published API price. Its existing gpt-5.3-codex family fallback (1.75/0.175/14 for input/cache reads/output) is not verified; schema 1 cannot exclude one ID from a family. gpt-oss models have no OpenAI token price and are excluded.",
     "gpt-5.4-cyber retired on 2026-10-01 and is still within the 91-day history window, but no token price is published in the reviewed official pages. It remains unpriced.",
     "gpt-4-1106-preview appears with conflicting shutdown dates of 2026-03-26 and 2026-10-23, and has no model-specific price in the reviewed official pages. Its existing gpt-4 family fallback (30/30/60 for input/cache reads/output) is not verified; schema 1 cannot exclude one ID from a family.",
-    "Gemini prices are Google's standard paid tier through 2026-12-31; they rise on 2027-01-01. gemini-3.7-flash has no published price and takes the equal gemini-3.6-flash and gemini-3.8-flash rate. Antigravity's gemini-pro-default is read as gemini-3.1-pro."
+    "Gemini 4 Argon standard prices per million tokens are $2 input, $10 output including thinking, and $0.10 cacheRead through 2026-11-30, rising to $4/$20/$0.20 on 2026-12-01, with no long-context surcharge. Other Gemini prices are Google's standard paid tier through 2026-12-31; they rise on 2027-01-01. gemini-3.7-flash has no published price and takes the equal gemini-3.6-flash and gemini-3.8-flash rate. Antigravity's gemini-pro-default is read as gemini-3.1-pro."
   ],
   "claude": {
     "webSearch": 0.01,
@@ -185,6 +185,7 @@
   },
   "gemini": {
     "models": [
+      { "id": "gemini-4-argon", "input": 2, "output": 10, "cacheRead": 0.1 },
       { "id": "gemini-3.1-pro", "input": 2, "output": 12, "cacheRead": 0.2, "longContext": { "above": 200000, "inputMultiplier": 2, "outputMultiplier": 1.5 } },
       { "id": "gemini-3.8-flash", "input": 0.75, "output": 3.75, "cacheRead": 0.075 },
       { "id": "gemini-3.7-flash", "input": 0.75, "output": 3.75, "cacheRead": 0.075 },

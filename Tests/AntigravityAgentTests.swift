@@ -94,8 +94,28 @@ enum AntigravityAgentTests {
         suite.expect(store.records.count == 1 && store.records.first?.tokens.total == record?.tokens.total,
                      "reading a running step again does not count anything twice")
 
+        for model in ["gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-medium-n", "gemini-4-argon-20261013"] {
+            let request = message([(1, .bytes(message([
+                (4, .bytes(message([(1, .varint(1318))]))),
+                (19, .bytes(Data(model.utf8))),
+            ])))])
+            sqlite3_open(path, &db)
+            insert("UPDATE gen_metadata SET data = ? WHERE idx = 0", [request])
+            sqlite3_close(db)
+            let argon = AgentLogCursor(path: path, provider: .antigravity)
+            var records: [AgentUsageRecord] = []
+            AgentAntigravityReader.readAppended(argon) { line in
+                for entry in AgentProvider.antigravity.reader.parse(line, state: &argon.state, now: now) {
+                    if case .usage(_, let record, _) = entry { records.append(record) }
+                }
+            }
+            let expected = (1000 * 2.0 + 9000 * 0.1 + 250 * 10.0) / 1_000_000
+            suite.expect(records.first?.model == model && abs((records.first?.cost ?? 0) - expected) < 1e-12,
+                         "Argon model enum and field 19 resolve \(model) to its standard price")
+        }
+
         limits(suite)
-        suite.expect(AgentPricing.price(for: AgentLogParser.antigravityModels["gemini-pro-default"] ?? "") != nil
+        suite.expect(AgentPricing.price(for: AntigravityReader.models["gemini-pro-default"] ?? "") != nil
                         && AgentPricing.price(for: "gemini-3.8-flash-lite") == nil,
                      "Antigravity's Pro alias is priced and an unlisted sibling is not")
     }
@@ -117,6 +137,8 @@ enum AntigravityAgentTests {
         let windows = limits?.windows ?? []
         suite.expect(limits?.provider == .antigravity && limits?.source == .account && windows.count == 2,
                      "only the Gemini group's limits are shown, not the Claude and GPT ones")
+        let argonLimits = AgentAntigravityLimits.parse(output.replacingOccurrences(of: "Gemini Models", with: "Gemini 4 Argon (Medium)"), observed: Date())
+        suite.expect(argonLimits?.windows.count == 2, "Gemini 4 groups retain their session and weekly limits")
         suite.expect(windows.contains { $0.kind == .session && $0.scope == nil && abs($0.usedPercent - 3) < 0.001
                                         && $0.resetsAt != nil }
                         && windows.contains { $0.kind == .weekly && $0.scope == nil && abs($0.usedPercent - 10) < 0.001 },
