@@ -23,8 +23,9 @@ enum AntigravityAgentTests {
         let response = message([
             (1, .bytes(message([(1, .varint(start + 1))]))),
             (8, .bytes(message([(1, .varint(start + 5))]))),
-            (9, .bytes(message([(1, .varint(1318)), (2, .varint(1000)), (3, .varint(200)),
-                                (5, .varint(9000)), (9, .varint(50))]))),
+            (9, .bytes(message([(1, .varint(1318)), (2, .varint(1000)), (3, .varint(250)),
+                                (5, .varint(9000)), (9, .varint(50)), (10, .varint(200)),
+                                (11, .bytes(Data("resp-1".utf8)))]))),
             (11, .varint(1318)),
         ])
         let running = message([(1, .bytes(message([(1, .varint(start + 6))])))])
@@ -34,6 +35,11 @@ enum AntigravityAgentTests {
             (20, .bytes(message([(1, .bytes(Data("last_step_index".utf8))), (2, .bytes(Data("0".utf8)))]))),
         ])))])
         let trajectory = message([(1, .bytes(message([(1, .bytes(Data("file:///Users/me/rocket".utf8)))])))])
+        let schema = """
+        CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, status integer, metadata blob);
+        CREATE TABLE gen_metadata (idx integer PRIMARY KEY, data blob, size integer);
+        CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob);
+        """
 
         var db: OpaquePointer?
         guard sqlite3_open(path, &db) == SQLITE_OK else {
@@ -41,11 +47,7 @@ enum AntigravityAgentTests {
             return
         }
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", nil, nil, nil)
-        sqlite3_exec(db, """
-        CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, status integer, metadata blob);
-        CREATE TABLE gen_metadata (idx integer PRIMARY KEY, data blob, size integer);
-        CREATE TABLE trajectory_metadata_blob (id text PRIMARY KEY, data blob);
-        """, nil, nil, nil)
+        sqlite3_exec(db, schema, nil, nil, nil)
         func insert(_ sql: String, _ blobs: [Data], _ ints: [Int64] = []) {
             var stmt: OpaquePointer?
             sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
@@ -83,7 +85,7 @@ enum AntigravityAgentTests {
         let record = store.records.first
         suite.expect(store.records.count == 1 && record?.model == "gemini-3.8-flash-n" && record?.project == "rocket"
                         && record?.tokens == AgentTokens(input: 1000, cacheRead: 9000, output: 250, reasoning: 50),
-                     "a closed WAL conversation is read, counting its model, folder and tokens, thinking as output")
+                     "a closed WAL conversation is read, counting its model, folder and tokens, thinking once, as output")
         let expected = (1000 * 0.75 + 9000 * 0.075 + 250 * 3.75) / 1_000_000
         suite.expect(abs((record?.cost ?? 0) - expected) < 1e-12, "Gemini responses are priced from the Gemini list")
         suite.expect(cursor.offset == 2, "reading stops before the step still running")
@@ -93,6 +95,100 @@ enum AntigravityAgentTests {
         read()
         suite.expect(store.records.count == 1 && store.records.first?.tokens.total == record?.tokens.total,
                      "reading a running step again does not count anything twice")
+
+        // A conversation started from this one's history holds copies of its
+        // steps, kept as history (status 5), with the ids of their responses.
+        let copy = folder.appending(path: "c1a55e.db").path
+        sqlite3_open(copy, &db)
+        sqlite3_exec(db, schema, nil, nil, nil)
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [prompt], [0, 14, 5])
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [response], [1, 15, 5])
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [running], [2, 132, 2])
+        insert("INSERT INTO gen_metadata VALUES (0, ?, 0)", [request])
+        insert("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", [trajectory])
+        sqlite3_close(db)
+        let copied = AgentLogCursor(path: copy, provider: .antigravity)
+        var copiedEntries: [AgentLogEntry] = []
+        AgentAntigravityReader.readAppended(copied) { line in
+            copiedEntries += AgentLogParser.parseAntigravity(line, state: &copied.state, now: now)
+        }
+        store.apply(copiedEntries, file: copy, provider: .antigravity, tracksTurns: true, modified: now, now: now)
+        suite.expect(store.records.count == 1 && store.records.first?.tokens.total == record?.tokens.total,
+                     "a response copied into another conversation counts once")
+        suite.expect(copied.offset == 2, "steps kept as history are settled, so reading moves past them")
+        let historyOnly = AgentUsageStore()
+        historyOnly.apply(copiedEntries, file: copy, provider: .antigravity, tracksTurns: true, modified: now, now: now)
+        suite.expect(historyOnly.records.count == 1 && historyOnly.records.first?.tokens == record?.tokens,
+                     "a response a conversation holds only as history still counts")
+        store.forget(files: [path])
+        suite.expect(store.records.count == 1 && store.records.first?.tokens == record?.tokens,
+                     "a copied response stays while another conversation still holds it")
+
+        // A step whose attempts failed and were tried again (field 28) holds
+        // what each attempt spent, with or without an id of its own.
+        let retried = folder.appending(path: "f411ed.db").path
+        let attempt = message([(2, .varint(400)), (3, .varint(20)), (12, .bytes(Data("msg-a".utf8)))])
+        let unnamed = message([(2, .varint(300)), (9, .varint(4)), (10, .varint(6))])
+        let retriedStep = message([
+            (1, .bytes(message([(1, .varint(start + 1))]))),
+            (11, .varint(1318)),
+            (28, .bytes(message([(1, .varint(1)), (2, .bytes(attempt))]))),
+            (28, .bytes(message([(1, .varint(2)), (2, .bytes(unnamed))]))),
+        ])
+        sqlite3_open(retried, &db)
+        sqlite3_exec(db, schema, nil, nil, nil)
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [prompt], [0, 14, 3])
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [retriedStep], [1, 15, 3])
+        insert("INSERT INTO gen_metadata VALUES (0, ?, 0)", [request])
+        sqlite3_close(db)
+        let retries = AgentUsageStore()
+        for _ in 0..<2 {
+            let attempts = AgentLogCursor(path: retried, provider: .antigravity)
+            var entries: [AgentLogEntry] = []
+            AgentAntigravityReader.readAppended(attempts) { line in
+                entries += AgentLogParser.parseAntigravity(line, state: &attempts.state, now: now)
+            }
+            retries.apply(entries, file: retried, provider: .antigravity, tracksTurns: true, modified: now, now: now)
+        }
+        suite.expect(retries.records.count == 2 && retries.records.map(\.tokens.input).sorted() == [300, 400]
+                        && retries.records.allSatisfy { $0.model == "gemini-3.8-flash-n" },
+                     "attempts that were tried again count once each, under the step's model")
+        suite.expect(retries.records.first { $0.tokens.input == 300 }?.tokens == AgentTokens(input: 300, output: 10, reasoning: 4),
+                     "counts without a total output add thinking to the reply")
+
+        // A running step gains attempts and counts between reads; each keeps
+        // its own key, including one that spent nothing at first.
+        let growing = folder.appending(path: "9a0b1e.db").path
+        func attempts(_ first: UInt64) -> Data {
+            message([
+                (1, .bytes(message([(1, .varint(start + 1))]))),
+                (11, .varint(1318)),
+                (28, .bytes(message([(2, .bytes(message([(2, .varint(first))])))]))),
+                (28, .bytes(message([(2, .bytes(message([(2, .varint(300))])))]))),
+            ])
+        }
+        sqlite3_open(growing, &db)
+        sqlite3_exec(db, schema, nil, nil, nil)
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [prompt], [0, 14, 3])
+        insert("INSERT INTO steps VALUES (?, ?, ?, ?)", [attempts(0)], [1, 15, 2])
+        insert("INSERT INTO gen_metadata VALUES (0, ?, 0)", [request])
+        sqlite3_close(db)
+        let growingCursor = AgentLogCursor(path: growing, provider: .antigravity)
+        let live = AgentUsageStore()
+        func readGrowing() {
+            var entries: [AgentLogEntry] = []
+            AgentAntigravityReader.readAppended(growingCursor) { line in
+                entries += AgentLogParser.parseAntigravity(line, state: &growingCursor.state, now: now)
+            }
+            live.apply(entries, file: growing, provider: .antigravity, tracksTurns: true, modified: now, now: now)
+        }
+        readGrowing()
+        sqlite3_open(growing, &db)
+        insert("UPDATE steps SET metadata = ? WHERE idx = 1", [attempts(100)])
+        sqlite3_close(db)
+        readGrowing()
+        suite.expect(growingCursor.offset == 1 && live.records.map(\.tokens.input).sorted() == [100, 300],
+                     "a running step's attempts keep their keys as its counts change")
 
         for model in ["gemini-4-argon", "gemini-4-argon-medium", "gemini-4-argon-medium-n", "gemini-4-argon-20261013"] {
             let request = message([(1, .bytes(message([

@@ -167,7 +167,11 @@ enum NotchAgentTests {
                         && AgentPricing.displayName("gpt-5-2025-08-07") == "GPT-5"
                         && AgentPricing.displayName("claude-mythos-preview") == "Mythos Preview"
                         && AgentPricing.displayName("claude-3-5-sonnet-latest") == "Sonnet 3.5"
-                        && AgentPricing.displayName("gpt-daybreak-red-latest") == "GPT Daybreak Red",
+                        && AgentPricing.displayName("gpt-daybreak-red-latest") == "GPT Daybreak Red"
+                        && AgentPricing.displayName("gemini-4-argon-b") == "Gemini 4 Argon B"
+                        && AgentPricing.displayName("gemini-3.8-flash-lite") == "Gemini 3.8 Flash Lite"
+                        && AgentPricing.displayName("gemini-4-argon-20261013") == "Gemini 4 Argon"
+                        && AgentPricing.displayName("gemini-2.5-pro-preview-06-05") == "Gemini 2.5 Pro Preview",
                      "model names read the way people say them, without snapshot dates")
         suite.expect(AgentPricing.displayName("gpt-7") == "GPT-7" && AgentPricing.displayName("claude-opus-6") == "Opus 6"
                         && AgentPricing.displayName("gpt-7-codex") == "GPT-7 Codex",

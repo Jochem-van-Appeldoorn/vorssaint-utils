@@ -7,9 +7,11 @@ import SQLite3
 /// Reads Antigravity CLI (`agy`) conversations. Each conversation is its own
 /// SQLite database in ~/.gemini/antigravity-cli/conversations, holding one
 /// row per step in `steps` and one row per model request in `gen_metadata`,
-/// both as protobuf. Only times, token counts, model names and the
-/// workspace folder are decoded; prompts, replies and tool output are never
-/// read out of a step.
+/// both as protobuf. Only times, token counts, model names, response ids
+/// and the workspace folder are decoded; prompts, replies and tool output
+/// are never read out of a step. A conversation started from another's
+/// history copies its steps, so a response is known by its own id rather
+/// than by the step that holds it.
 enum AgentAntigravityReader {
     static let folder = ".gemini/antigravity-cli/conversations"
 
@@ -19,8 +21,10 @@ enum AgentAntigravityReader {
         static let response: Int64 = 15
     }
 
-    /// Statuses after which a step no longer changes: done, cancelled, failed.
-    static let settledStatuses: Set<Int64> = [3, 6, 7]
+    /// Statuses after which a step no longer changes: done, history, cancelled,
+    /// failed. History marks earlier steps, like those a conversation copied
+    /// from the one it started from.
+    static let settledStatuses: Set<Int64> = [3, 5, 6, 7]
 
     /// A conversation is one `<uuid>.db` directly in the folder.
     static func isConversation(_ path: String, in root: URL) -> Bool {
@@ -83,7 +87,7 @@ enum AgentAntigravityReader {
 
         let conversation = ((cursor.path as NSString).lastPathComponent as NSString).deletingPathExtension
         if cursor.state.project.isEmpty { cursor.state.project = workspace(db) ?? "" }
-        let models = steps.contains { $0.meta.usage != nil } ? modelNames(db) : [:]
+        let models = steps.contains { !$0.meta.usages.isEmpty } ? modelNames(db) : [:]
         let floor = horizon.timeIntervalSince1970
 
         var settledThrough = Int64(cursor.offset) - 1
@@ -97,12 +101,18 @@ enum AgentAntigravityReader {
                 "settled": settled, "time": created, "project": cursor.state.project,
             ]
             if let end = step.meta.completed { json["end"] = end }
-            if let usage = step.meta.usage {
-                json["model"] = (step.meta.modelEnum > 0 ? models[-step.meta.modelEnum] : nil) ?? models[step.index] ?? ""
-                json["input"] = usage.input
-                json["cacheRead"] = usage.cacheRead
-                json["output"] = usage.output
-                json["reasoning"] = usage.reasoning
+            if !step.meta.usages.isEmpty {
+                json["usage"] = step.meta.usages.map { usage -> [String: Any] in
+                    let number = usage.model > 0 ? usage.model : step.meta.modelEnum
+                    var entry: [String: Any] = [
+                        "model": (number > 0 ? models[-number] : nil) ?? models[step.index] ?? "",
+                        "input": usage.input, "cacheRead": usage.cacheRead,
+                        "output": usage.output, "reasoning": usage.reasoning,
+                    ]
+                    if let id = usage.id { entry["id"] = id }
+                    if let attempt = usage.attempt { entry["attempt"] = attempt }
+                    return entry
+                }
             }
             if let data = try? JSONSerialization.data(withJSONObject: json) { line(data) }
         }
@@ -159,18 +169,44 @@ enum AgentAntigravityReader {
         return Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, column)))
     }
 
+    /// What one model response spent.
     struct Usage {
+        /// The response's own id, which a copy of it keeps: the response id,
+        /// else the provider's message id, else Antigravity's message id.
+        var id: String?
+        /// Which of the step's retried attempts this is, nil for its response.
+        var attempt: Int?
+        var model: Int64 = 0
         var input = 0
         var cacheRead = 0
         var output = 0
         var reasoning = 0
+
+        /// Nil when the counts spend nothing.
+        init?(_ counts: Data, attempt: Int? = nil) {
+            self.attempt = attempt
+            // Input leaves out the cached part. Output counts thinking
+            // (field 9) with the visible reply (field 10).
+            input = Int(Protobuf.varint(counts, field: 2) ?? 0)
+            cacheRead = Int(Protobuf.varint(counts, field: 5) ?? 0)
+            reasoning = Int(Protobuf.varint(counts, field: 9) ?? 0)
+            output = max(Int(Protobuf.varint(counts, field: 3) ?? 0),
+                         reasoning + Int(Protobuf.varint(counts, field: 10) ?? 0))
+            guard input + cacheRead + output > 0 else { return nil }
+            model = Int64(Protobuf.varint(counts, field: 1) ?? 0)
+            id = [(11, "response"), (12, "provider"), (7, "message")].lazy.compactMap { field, kind in
+                Protobuf.string(counts, field: field).flatMap { $0.isEmpty ? nil : "\(kind):\($0)" }
+            }.first
+        }
     }
 
     /// The parts of a step's metadata the island reads.
     struct StepMeta {
         var created: Double?
         var completed: Double?
-        var usage: Usage?
+        /// The step's response, and the attempts before it that failed and
+        /// were tried again, which spent tokens too.
+        var usages: [Usage] = []
         var modelEnum: Int64 = 0
 
         init() {}
@@ -179,15 +215,12 @@ enum AgentAntigravityReader {
             created = Protobuf.message(data, field: 1).flatMap(Protobuf.timestamp)
             completed = Protobuf.message(data, field: 8).flatMap(Protobuf.timestamp)
             modelEnum = Int64(Protobuf.varint(data, field: 11) ?? 0)
-            if let counts = Protobuf.message(data, field: 9) {
-                let input = Int(Protobuf.varint(counts, field: 2) ?? 0)
-                let output = Int(Protobuf.varint(counts, field: 3) ?? 0)
-                let cached = Int(Protobuf.varint(counts, field: 5) ?? 0)
-                let thinking = Int(Protobuf.varint(counts, field: 9) ?? 0)
-                if input + output + cached + thinking > 0 {
-                    usage = Usage(input: input, cacheRead: cached, output: output, reasoning: thinking)
-                }
+            // Numbered before any are skipped, so an attempt keeps its number
+            // while the step is still running.
+            let retries = Protobuf.messages(data, field: 28).enumerated().compactMap { attempt, retry in
+                Protobuf.message(retry, field: 2).flatMap { Usage($0, attempt: attempt) }
             }
+            usages = [Protobuf.message(data, field: 9).flatMap { Usage($0) }].compactMap { $0 } + retries
         }
     }
 }

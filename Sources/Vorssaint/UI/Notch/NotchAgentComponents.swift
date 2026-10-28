@@ -335,6 +335,7 @@ struct NotchAgentHeatmap: View {
 /// monochrome image the app shows in the menu bar, or else the app's icon.
 /// None of that artwork ships with Vorssaint, so a Mac without the app
 /// keeps a symbol. Looked up once; the strip redraws every second.
+@MainActor
 enum AgentMarks {
     enum Mark {
         /// Drawn in the agent's color, like the symbol it replaces.
@@ -364,7 +365,37 @@ enum AgentMarks {
             }
             return .icon(NSWorkspace.shared.icon(forFile: url.path))
         }
-        return nil
+        return borrowedLogo(provider)
+    }
+
+    /// A logo another app from the same maker carries: Google's Gemini app
+    /// holds Antigravity's in a resource bundle that only SwiftUI's image
+    /// lookup reads.
+    private static func borrowedLogo(_ provider: AgentProvider) -> Mark? {
+        guard provider == .antigravity,
+              let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.google.GeminiMacOS"),
+              let url = Bundle(url: app)?.url(forResource: "AntigravityLogo", withExtension: "bundle"),
+              let bundle = Bundle(url: url) else { return nil }
+        // Drawn with a margin, like the app icons the other marks come from.
+        let renderer = ImageRenderer(content: Image("logo_antigravity_color", bundle: bundle)
+            .resizable().scaledToFit().padding(4).frame(width: 40, height: 40))
+        renderer.scale = 2
+        // A name the catalog lacks draws nothing rather than failing.
+        guard let image = renderer.cgImage, drawsSomething(image) else { return nil }
+        return .icon(NSImage(cgImage: image, size: NSSize(width: 40, height: 40)))
+    }
+
+    private static func drawsSomething(_ image: CGImage) -> Bool {
+        let width = image.width, height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn && stride(from: 3, to: pixels.count, by: 4).contains { pixels[$0] > 0 }
     }
 }
 
