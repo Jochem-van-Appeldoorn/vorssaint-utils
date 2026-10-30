@@ -38,16 +38,19 @@ struct AntigravityReader: AgentHarnessReader {
         let live = now.timeIntervalSince(end) < Self.live
         var entries: [AgentLogEntry] = []
 
-        if let raw = json["model"] as? String {
-            let model = AgentLogParser.native(raw)
+        for usage in json["usage"] as? [[String: Any]] ?? [] {
+            let model = AgentLogParser.native(usage["model"] as? String ?? "")
             if !model.isEmpty { state.model = Self.models[model] ?? model }
-            let reasoning = AgentLogParser.int(json["reasoning"])
-            let tokens = AgentTokens(input: AgentLogParser.int(json["input"]), cacheRead: AgentLogParser.int(json["cacheRead"]),
-                                     output: AgentLogParser.int(json["output"]) + reasoning, reasoning: reasoning)
+            let tokens = AgentTokens(input: AgentLogParser.int(usage["input"]), cacheRead: AgentLogParser.int(usage["cacheRead"]),
+                                     output: AgentLogParser.int(usage["output"]), reasoning: AgentLogParser.int(usage["reasoning"]))
             let billable = AgentBillable(tokens: tokens)
             let priced = AgentPricing.cost(billable, model: state.model)
-            let index = AgentLogParser.int(json["idx"])
-            entries.append(.usage(key: "antigravity:\(state.session):\(index)", record: AgentUsageRecord(
+            // A response copied into another conversation keeps its id, so it
+            // counts once wherever it is read.
+            let step = "antigravity:\(state.session):\(AgentLogParser.int(json["idx"]))"
+            let key = (usage["id"] as? String).map { "antigravity:\(AgentLogParser.native($0))" }
+                ?? (usage["attempt"] as? Int).map { "\(step):attempt:\($0)" } ?? step
+            entries.append(.usage(key: key, record: AgentUsageRecord(
                 provider: .antigravity, date: end, model: state.model, project: state.project, session: state.session,
                 tokens: tokens, cost: priced.cost, savings: priced.savings), billable: billable))
         }
